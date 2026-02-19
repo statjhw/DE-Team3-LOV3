@@ -11,11 +11,11 @@ Module Functions:
 Example:
     >>> config = load_config("config_prod.yaml")
     >>> spark = get_spark_session(config)
-    >>> input_df = spark.read.parquet("s3://bucket/data")
+    >>> input_df = spark.read.parquet("s3a://bucket/data")
 
 Supported Config Formats:
     - Local: /path/to/config.yaml
-    - S3: s3://bucket-name/path/to/config.yaml
+    - S3: s3a://bucket-name/path/to/config.yaml
 
 Error Handling:
     - 설정 파일 로드 실패 시 경고 로그 기록 후 빈 dict 반환
@@ -33,11 +33,11 @@ logger = logging.getLogger(__name__)
 
 def load_config(config_path: str) -> Dict[str, Any]:
     """
-    YAML 설정 파일 로드 (로컬 또는 s3://)
+    YAML 설정 파일 로드 (로컬 또는 s3a://)
     """
     path = config_path.strip()
     try:
-        if path.startswith("s3://"):
+        if path.startswith("s3a://"):
             from urllib.parse import urlparse
             import boto3
             parsed = urlparse(path)

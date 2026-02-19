@@ -1,8 +1,8 @@
-# EMR 전용 (입출력 경로: s3://...)
+# EMR 전용 (입출력 경로: s3a://...)
 
 storage:
-  input_base_path: "s3://softeer-final-porj/raw-sensor-data"
-  output_base_path: "s3://softeer-final-porj/stage1_anomaly_detected"
+  input_base_path: "s3a://softeer-final-porj/raw-sensor-data"
+  output_base_path: "s3a://softeer-final-porj/stage1_anomaly_detected"
   input_partition_format: "dt=YYYY-MM-DD"
   ttl_days: 14
 

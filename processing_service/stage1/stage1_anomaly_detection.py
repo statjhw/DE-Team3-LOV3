@@ -6,29 +6,34 @@ Stage 1: Anomaly Detection - 비즈니스 로직
 
 엔트리 포인트는 `run_job(spark, config, input_base_path, output_base_path, batch_date)` 이며,
 `config_local.yaml` / `config_prod.yaml`의 설정에 따라 입출력 경로와 Spark 튜닝 옵션이 결정됩니다.
+
+최적화 포인트:
+- 파일 1개 = 1 trip 구조를 활용해 mapInPandas로 Z-score 계산 → Window 셔플 0회
+- rdd.isEmpty() 제거 (Action이라 전체 스캔 유발)
+- repartition 제거, coalesce만 사용 (셔플 없이 파티션 병합)
 """
 
-from pyspark.sql import SparkSession, DataFrame, Window
+from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
     StructType, StructField, StringType, DoubleType,
     IntegerType, LongType,
 )
 from pyspark.sql.utils import AnalysisException
-from typing import Dict, Any
+from typing import Dict, Any, Iterator
 from datetime import date, timedelta
 import os
 import logging
 
 logger = logging.getLogger(__name__)
 
-STAGE1_OUTPUT_COLUMNS = [
-    "timestamp", "trip_id", "vehicle_id",
-    "accel_x", "accel_y", "accel_z",
-    "gyro_x", "gyro_y", "gyro_z",
-    "velocity", "lon", "lat", "hdop", "satellites",
-    "nor_accel_z", "nor_gyro_y", "impact_score",
-]
+OUTPUT_SCHEMA = StructType([
+    StructField("timestamp", LongType(), False),
+    StructField("lon", DoubleType(), False),
+    StructField("lat", DoubleType(), False),
+    StructField("impact_score", DoubleType(), False),
+    StructField("is_pothole", IntegerType(), False),
+])
 
 
 def get_input_schema() -> StructType:
@@ -86,15 +91,7 @@ class AnomalyDetectionPipeline:
 
     def run(self, input_df: DataFrame) -> DataFrame:
         filtered_df = self._context_filtering(input_df)
-        # 빈 DataFrame 감지 및 경고
-        if filtered_df.rdd.isEmpty():
-            logger.warning("컨텍스트 필터링 후 데이터 없음 — 이상 징후 없이 빈 결과 반환")
-        normalized_df = self._z_score_normalization(filtered_df)
-        result_df = self._calculate_impact_score(normalized_df)
-        # 최종 빈 DataFrame 감지
-        if result_df.rdd.isEmpty():
-            logger.warning("임팩트 스코어 필터링 후 데이터 없음")
-        return result_df
+        return self._compute_anomaly_scores(filtered_df)
 
     def _context_filtering(self, df: DataFrame) -> DataFrame:
         cfg = self.config_broadcast.value.get("context_filtering", {})
@@ -113,44 +110,71 @@ class AnomalyDetectionPipeline:
             (F.col("satellites") >= s_min)
         )
 
-    def _z_score_normalization(self, df: DataFrame) -> DataFrame:
-        """Window 셔플을 1회로 줄이기 위해 withColumn 체이닝 사용"""
-        trip_window = Window.partitionBy("trip_id")
-        mean_accel_z = F.avg(F.col("accel_z")).over(trip_window)
-        std_accel_z = F.stddev(F.col("accel_z")).over(trip_window)
-        mean_gyro_y = F.avg(F.col("gyro_y")).over(trip_window)
-        std_gyro_y = F.stddev(F.col("gyro_y")).over(trip_window)
+    def _compute_anomaly_scores(self, df: DataFrame) -> DataFrame:
+        """
+        파티션(= 1 trip 파일)별로 pandas에서 Z-score 계산 및 임팩트 스코어 산출.
 
-        df = df.withColumn(
-            "nor_accel_z",
-            F.when(std_accel_z.isNull() | (std_accel_z == 0), F.lit(0.0)).otherwise(
-                (F.col("accel_z") - mean_accel_z) / std_accel_z
-            ),
-        ).withColumn(
-            "nor_gyro_y",
-            F.when(std_gyro_y.isNull() | (std_gyro_y == 0), F.lit(0.0)).otherwise(
-                (F.col("gyro_y") - mean_gyro_y) / std_gyro_y
-            ),
-        )
-        return df
-
-    def _calculate_impact_score(self, df: DataFrame) -> DataFrame:
+        Window.partitionBy("trip_id") 대신 mapInPandas를 사용해 셔플을 완전히 제거한다.
+        파일 1개 = 1 trip 구조이므로 각 Spark 파티션은 단일 trip 데이터만 포함하며,
+        혹시 한 파티션에 여러 trip이 섞인 경우도 groupby로 올바르게 처리한다.
+        """
         cfg = self.config_broadcast.value.get("impact_score", {})
         weights = cfg.get("weights", {})
-        w1 = weights.get("accel_z")
-        w2 = weights.get("gyro_y")
-        threshold = cfg.get("threshold")
-
-        if w1 is None or w2 is None or threshold is None:
+        if weights.get("accel_z") is None or weights.get("gyro_y") is None or cfg.get("threshold") is None:
             raise ValueError(
                 "impact_score 설정 키 누락: weights.accel_z, weights.gyro_y, threshold"
             )
+        w1 = float(weights["accel_z"])
+        w2 = float(weights["gyro_y"])
+        threshold = float(cfg["threshold"])
 
-        scored = df.withColumn(
-            "impact_score",
-            (F.abs(F.col("nor_accel_z")) * F.lit(w1)) + (F.abs(F.col("nor_gyro_y")) * F.lit(w2)),
-        )
-        return scored.filter(F.col("impact_score") > threshold)
+        def _process_partition(pdf_iter: Iterator) -> Iterator:
+            import pandas as pd
+            from collections import defaultdict
+
+            # 파티션 내 청크를 trip_id별로 버퍼링
+            # (파일 1개 = 1 trip이면 루프 1회, 혼합 파티션도 정확히 처리)
+            trip_buffers: dict = defaultdict(list)
+            for pdf in pdf_iter:
+                if pdf.empty:
+                    continue
+                for trip_id, group in pdf.groupby("trip_id", sort=False):
+                    trip_buffers[trip_id].append(group)
+
+            for chunks in trip_buffers.values():
+                trip_df = pd.concat(chunks, ignore_index=True)
+
+                az = trip_df["accel_z"]
+                std_az = az.std()
+                nor_az = (
+                    (az - az.mean()) / std_az
+                    if (std_az is not None and std_az != 0)
+                    else pd.Series(0.0, index=trip_df.index)
+                )
+
+                gy = trip_df["gyro_y"]
+                std_gy = gy.std()
+                nor_gy = (
+                    (gy - gy.mean()) / std_gy
+                    if (std_gy is not None and std_gy != 0)
+                    else pd.Series(0.0, index=trip_df.index)
+                )
+
+                impact = nor_az.abs() * w1 + nor_gy.abs() * w2
+                is_pothole = (impact > threshold).astype("int32")
+
+                result = pd.DataFrame({
+                    "timestamp": trip_df["timestamp"].values,
+                    "lon": trip_df["lon"].values,
+                    "lat": trip_df["lat"].values,
+                    "impact_score": impact.values,
+                    "is_pothole": is_pothole.values,
+                })
+
+                if not result.empty:
+                    yield result
+
+        return df.mapInPandas(_process_partition, schema=OUTPUT_SCHEMA)
 
 
 def run_job(
@@ -160,16 +184,7 @@ def run_job(
     output_base_path: str,
     batch_date: str = None,
 ) -> None:
-    """
-    Stage 1 일 배치 실행: 입력 읽기 → 파이프라인 → 출력 저장
-
-    개선 사항:
-    - 입력 경로 존재 여부 체크 및 예외 처리
-    - Window 셔플을 1회로 감소
-    - coalesce 대신 repartition으로 균등 분배 후 적용
-    - cache 효율성 개선 (write 전에만 cache, 최종 count는 제거)
-    - 빈 DataFrame 감시
-    """
+    """Stage 1 일 배치 실행: 입력 읽기 → 파이프라인 → 출력 저장"""
     batch_dt = _batch_date(batch_date)
     input_base_path = input_base_path.rstrip("/")
     output_base_path = output_base_path.rstrip("/")
@@ -194,20 +209,17 @@ def run_job(
         logger.error("파이프라인 설정 오류: %s", str(e))
         raise
 
-    # 3. 파이프라인 실행
+    # 3. 파이프라인 실행 (mapInPandas → 출력 스키마: timestamp, lon, lat, impact_score, is_pothole)
     result_df = pipeline.run(input_df)
-    result_df = result_df.select(STAGE1_OUTPUT_COLUMNS)
 
     # 4. 출력 파티션 수 최적화
-    # (로컬: 파일 개수 줄이기 / 프로드: 균등 분배 후 파티션 감소로 데이터 스큐 완화)
+    # coalesce만 사용: 셔플 없이 인접 파티션을 병합해 출력 파일 수 감소
+    # (repartition은 셔플 발생 + 이미 anomaly만 남은 소량 데이터에 불필요)
     spark_config = config.get("spark", {})
     target_partitions = spark_config.get("coalesce_partitions", 16)
     current_partitions = result_df.rdd.getNumPartitions()
 
     if current_partitions > target_partitions:
-        # repartition: 셔플을 통해 데이터 균등 분배
-        result_df = result_df.repartition(target_partitions)
-        # coalesce: 파티션을 줄이되 셔플 없이 인접 파티션 병합
         result_df = result_df.coalesce(target_partitions)
         logger.info("출력 파티션 조정: %d → %d", current_partitions, target_partitions)
 
@@ -236,20 +248,22 @@ if __name__ == "__main__":
     if _stage1_dir not in sys.path:
         sys.path.insert(0, _stage1_dir)
 
-    from connection import load_config, get_spark_session
+    from connection_stage1 import load_config, get_spark_session
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
     parser = argparse.ArgumentParser(description="Stage 1: Anomaly Detection")
-    parser.add_argument("--env", required=True, choices=["local", "prod"])
+    parser.add_argument("--env", required=True, choices=["local", "stage1", "prod"])
     parser.add_argument("--batch-date", default=None, help="YYYY-MM-DD")
     args = parser.parse_args()
 
-    # config 파일은 stage1 안에 있음 (config_local.yaml, config_prod.yaml)
+    # config 파일은 stage1 안에 있음 (config_local.yaml, config_stage1.yaml)
     config_path = os.path.join(_stage1_dir, f"config_{args.env}.yaml")
+    
+    # 로컬 파일이 없으면 S3에서 로드 시도
     if not os.path.isfile(config_path):
-        logger.error("설정 파일 없음: %s", config_path)
-        sys.exit(1)
+        logger.warning("로컬 설정 파일 없음: %s, S3에서 로드 시도", config_path)
+        config_path = f"s3a://softeer-7-de3-bucket/scripts/config_{args.env}.yaml"
 
     config = load_config(config_path)
     storage = config.get("storage", {})
