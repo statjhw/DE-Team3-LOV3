@@ -30,6 +30,7 @@ from urllib.request import Request, urlopen
 from airflow import DAG
 from airflow.operators.bash import BashOperator
 from airflow.providers.ssh.operators.ssh import SSHOperator
+from airflow.utils.task_group import TaskGroup
 
 from dag_utils import build_spark_submit_cmd, build_s3_check_cmd
 
@@ -72,7 +73,7 @@ ALL_INSTANCE_IDS = (
 
 
 # ============================================================
-# Slack 장애 알림 콜백
+# Slack 알림 콜백
 # ============================================================
 def _send_slack(text):
     """Slack Incoming Webhook 메시지 전송"""
@@ -139,7 +140,7 @@ with DAG(
 ) as dag:
 
     # --------------------------------------------------------
-    # 1. S3 입력 데이터 존재 확인
+    # 0. S3 입력 데이터 존재 확인
     # --------------------------------------------------------
     check_s3_input = BashOperator(
         task_id="check_s3_input",
@@ -148,230 +149,218 @@ with DAG(
         ),
     )
 
-    # --------------------------------------------------------
-    # 2. EC2 인스턴스 시작
-    # --------------------------------------------------------
-    start_cluster = BashOperator(
-        task_id="start_cluster",
-        bash_command=f"""
-        echo "EC2 인스턴스 시작 중..."
-        aws ec2 start-instances \
-            --instance-ids {ALL_INSTANCE_IDS} \
-            --region {AWS_REGION}
+    # ========================================================
+    # 인프라 준비
+    # ========================================================
+    with TaskGroup("infra_setup", tooltip="EC2 시작 → Spark 기동 → 코드 배포 → 의존성 설치") as infra_setup:
 
-        echo "인스턴스 running 대기 중..."
-        aws ec2 wait instance-running \
-            --instance-ids {ALL_INSTANCE_IDS} \
-            --region {AWS_REGION}
+        start_cluster = BashOperator(
+            task_id="start_cluster",
+            bash_command=f"""
+            echo "EC2 인스턴스 시작 중..."
+            aws ec2 start-instances \
+                --instance-ids {ALL_INSTANCE_IDS} \
+                --region {AWS_REGION}
 
-        echo "30초 네트워크 안정화 대기..."
-        sleep 30
-        """,
-    )
+            echo "인스턴스 running 대기 중..."
+            aws ec2 wait instance-running \
+                --instance-ids {ALL_INSTANCE_IDS} \
+                --region {AWS_REGION}
 
-    # --------------------------------------------------------
-    # 3. Spark 클러스터 시작 (workers 파일 자동 갱신)
-    # --------------------------------------------------------
-    start_spark = SSHOperator(
-        task_id="start_spark",
-        ssh_conn_id=SSH_CONN_ID,
-        command=f"""
-        source ~/.bashrc
+            echo "30초 네트워크 안정화 대기..."
+            sleep 30
+            """,
+        )
 
-        echo "=== Spark workers 파일 갱신 ==="
-        cat > /opt/spark/conf/workers <<EOF
+        start_spark = SSHOperator(
+            task_id="start_spark",
+            ssh_conn_id=SSH_CONN_ID,
+            command=f"""
+            source ~/.bashrc
+
+            echo "=== Spark workers 파일 갱신 ==="
+            cat > /opt/spark/conf/workers <<EOF
 {WORKER1_PRIVATE_IP}
 {WORKER2_PRIVATE_IP}
 {WORKER3_PRIVATE_IP}
 {WORKER4_PRIVATE_IP}
 EOF
-        echo "workers 파일 내용:"
-        cat /opt/spark/conf/workers
+            echo "workers 파일 내용:"
+            cat /opt/spark/conf/workers
 
-        /opt/spark/sbin/start-all.sh
-        /opt/spark/sbin/start-history-server.sh
-        """,
-        cmd_timeout=300,
-    )
+            /opt/spark/sbin/start-all.sh
+            /opt/spark/sbin/start-history-server.sh
+            """,
+            cmd_timeout=300,
+        )
 
-    # --------------------------------------------------------
-    # 4. S3 → Master 코드 다운로드
-    # --------------------------------------------------------
-    download_code = SSHOperator(
-        task_id="download_code",
-        ssh_conn_id=SSH_CONN_ID,
-        command=f"""
-        rm -rf {JOB_DIR} && mkdir -p {JOB_DIR}
-        aws s3 cp s3://{S3_BUCKET}/{S3_CODE_PREFIX}/stage1/ {JOB_DIR}/stage1/ --recursive --region {AWS_REGION}
-        aws s3 cp s3://{S3_BUCKET}/{S3_CODE_PREFIX}/stage2/ {JOB_DIR}/stage2/ --recursive --region {AWS_REGION}
-        echo "=== 다운로드 완료 ==="
-        ls -la {JOB_DIR}/stage1/
-        ls -la {JOB_DIR}/stage2/
-        """,
-        cmd_timeout=300,
-    )
+        download_code = SSHOperator(
+            task_id="download_code",
+            ssh_conn_id=SSH_CONN_ID,
+            command=f"""
+            rm -rf {JOB_DIR} && mkdir -p {JOB_DIR}
+            aws s3 cp s3://{S3_BUCKET}/{S3_CODE_PREFIX}/stage1/ {JOB_DIR}/stage1/ --recursive --region {AWS_REGION}
+            aws s3 cp s3://{S3_BUCKET}/{S3_CODE_PREFIX}/stage2/ {JOB_DIR}/stage2/ --recursive --region {AWS_REGION}
+            echo "=== 다운로드 완료 ==="
+            ls -la {JOB_DIR}/stage1/
+            ls -la {JOB_DIR}/stage2/
+            """,
+            cmd_timeout=300,
+        )
 
-    # --------------------------------------------------------
-    # 5. Python 의존성 설치 (Master + 모든 Worker)
-    # --------------------------------------------------------
-    install_deps = SSHOperator(
-        task_id="install_deps",
-        ssh_conn_id=SSH_CONN_ID,
-        command=f"""
-        echo "=== Master에 pyarrow 설치 ==="
-        pip3 install pyarrow --quiet
+        install_deps = SSHOperator(
+            task_id="install_deps",
+            ssh_conn_id=SSH_CONN_ID,
+            command=f"""
+            echo "=== Master에 pyarrow 설치 ==="
+            pip3 install pyarrow --quiet
 
-        echo "=== Workers에 pyarrow 설치 ==="
-        for worker in {WORKER1_PRIVATE_IP} {WORKER2_PRIVATE_IP} {WORKER3_PRIVATE_IP} {WORKER4_PRIVATE_IP}; do
-            ssh -o StrictHostKeyChecking=no $worker "pip3 install pyarrow --quiet" &
-        done
-        wait
-        echo "=== 의존성 설치 완료 ==="
-        """,
-        cmd_timeout=300,
-    )
+            echo "=== Workers에 pyarrow 설치 ==="
+            for worker in {WORKER1_PRIVATE_IP} {WORKER2_PRIVATE_IP} {WORKER3_PRIVATE_IP} {WORKER4_PRIVATE_IP}; do
+                ssh -o StrictHostKeyChecking=no $worker "pip3 install pyarrow --quiet" &
+            done
+            wait
+            echo "=== 의존성 설치 완료 ==="
+            """,
+            cmd_timeout=300,
+        )
 
-    # --------------------------------------------------------
-    # 6. Stage1 — Anomaly Detection
-    # --------------------------------------------------------
-    run_stage1 = SSHOperator(
-        task_id="run_stage1",
-        ssh_conn_id=SSH_CONN_ID,
-        command=build_spark_submit_cmd(
-            spark_master_uri=SPARK_MASTER_URI,
-            job_dir=JOB_DIR,
-            stage="stage1",
-            main_script="stage1_anomaly_detection.py",
-            py_files=["connection_stage1.py"],
-            stage_args="--env stage1 --batch-date {{ ds }}",
-            aws_region=AWS_REGION,
-            total_executor_cores=8,
-        ),
-        cmd_timeout=7200,
-    )
+        start_cluster >> start_spark >> download_code >> install_deps
 
-    # --------------------------------------------------------
-    # 7. Stage1 출력 확인
-    # --------------------------------------------------------
-    check_s3_stage1_out = BashOperator(
-        task_id="check_s3_stage1_out",
-        bash_command=build_s3_check_cmd(
-            S3_BUCKET, S3_STAGE1_OUTPUT_PREFIX, AWS_REGION, partition="dt={{ ds }}"
-        ),
-    )
+    # ========================================================
+    # Spark 처리 (Stage1 → Stage2)
+    # ========================================================
+    with TaskGroup("spark_processing", tooltip="Stage1 이상탐지 → Stage2 공간클러스터링") as spark_processing:
 
-    # --------------------------------------------------------
-    # 8. Stage2 — Spatial Clustering
-    # --------------------------------------------------------
-    run_stage2 = SSHOperator(
-        task_id="run_stage2",
-        ssh_conn_id=SSH_CONN_ID,
-        command=build_spark_submit_cmd(
-            spark_master_uri=SPARK_MASTER_URI,
-            job_dir=JOB_DIR,
-            stage="stage2",
-            main_script="stage2_spatial_clustering.py",
-            py_files=["connection_stage2.py"],
-            stage_args="--env stage2 --batch-date {{ ds }}",
-            aws_region=AWS_REGION,
-            total_executor_cores=8,
-        ),
-        cmd_timeout=3600,
-    )
+        run_stage1 = SSHOperator(
+            task_id="run_stage1",
+            ssh_conn_id=SSH_CONN_ID,
+            command=build_spark_submit_cmd(
+                spark_master_uri=SPARK_MASTER_URI,
+                job_dir=JOB_DIR,
+                stage="stage1",
+                main_script="stage1_anomaly_detection.py",
+                py_files=["connection_stage1.py"],
+                stage_args="--env stage1 --batch-date {{ ds }}",
+                aws_region=AWS_REGION,
+                total_executor_cores=8,
+            ),
+            cmd_timeout=7200,
+        )
 
-    # --------------------------------------------------------
-    # 9. Stage2 출력 확인
-    # --------------------------------------------------------
-    check_s3_stage2_out = BashOperator(
-        task_id="check_s3_stage2_out",
-        bash_command=build_s3_check_cmd(
-            S3_BUCKET, S3_STAGE2_OUTPUT_PREFIX, AWS_REGION, partition="dt={{ ds }}"
-        ),
-    )
+        check_s3_stage1_out = BashOperator(
+            task_id="check_s3_stage1_out",
+            bash_command=build_s3_check_cmd(
+                S3_BUCKET, S3_STAGE1_OUTPUT_PREFIX, AWS_REGION, partition="dt={{ ds }}"
+            ),
+        )
 
-    # --------------------------------------------------------
-    # 10. Stage2 결과 → PostgreSQL RDB 적재 (serving EC2)
-    # --------------------------------------------------------
-    load_to_rdb = SSHOperator(
-        task_id="load_to_rdb",
-        ssh_conn_id=SERVING_SSH_CONN_ID,
-        command=f"""
-        set -a && source {SERVING_DIR}/.env && set +a
-        source {SERVING_VENV}/bin/activate
-        cd {SERVING_DIR}
-        python -m loaders.pothole_loader \
-            --s3-path "s3://{S3_BUCKET}/{S3_STAGE2_OUTPUT_PREFIX}/dt={{{{ ds }}}}/" \
-            --date "{{{{ ds }}}}" \
-            --config config.yaml
-        """,
-        cmd_timeout=600,
-    )
+        run_stage2 = SSHOperator(
+            task_id="run_stage2",
+            ssh_conn_id=SSH_CONN_ID,
+            command=build_spark_submit_cmd(
+                spark_master_uri=SPARK_MASTER_URI,
+                job_dir=JOB_DIR,
+                stage="stage2",
+                main_script="stage2_spatial_clustering.py",
+                py_files=["connection_stage2.py"],
+                stage_args="--env stage2 --batch-date {{ ds }}",
+                aws_region=AWS_REGION,
+                total_executor_cores=8,
+            ),
+            cmd_timeout=3600,
+        )
 
-    # --------------------------------------------------------
-    # 11. Materialized View 갱신
-    # --------------------------------------------------------
-    refresh_views = SSHOperator(
-        task_id="refresh_views",
-        ssh_conn_id=SERVING_SSH_CONN_ID,
-        command=f"""
-        set -a && source {SERVING_DIR}/.env && set +a
-        docker exec pothole-postgres psql -U pothole_user -d road_safety -c "
-            REFRESH MATERIALIZED VIEW CONCURRENTLY mvw_dashboard_heatmap;
-            REFRESH MATERIALIZED VIEW CONCURRENTLY mvw_dashboard_weekly_stats;
-            REFRESH MATERIALIZED VIEW CONCURRENTLY mvw_dashboard_repair_priority;
-        "
-        echo "=== Materialized View 갱신 완료 ==="
-        """,
-        cmd_timeout=300,
-    )
+        check_s3_stage2_out = BashOperator(
+            task_id="check_s3_stage2_out",
+            bash_command=build_s3_check_cmd(
+                S3_BUCKET, S3_STAGE2_OUTPUT_PREFIX, AWS_REGION, partition="dt={{ ds }}"
+            ),
+        )
 
-    # --------------------------------------------------------
-    # 12. 일일 이메일 리포트 전송
-    # --------------------------------------------------------
-    send_email_report = SSHOperator(
-        task_id="send_email_report",
-        ssh_conn_id=SERVING_SSH_CONN_ID,
-        command=f"""
-        set -a && source {SERVING_DIR}/.env && set +a
-        source {SERVING_VENV}/bin/activate
-        cd {SERVING_DIR}
-        python -m reporters.email_reporter \
-            --email "$REPORT_EMAIL" \
-            --date "{{{{ ds }}}}" \
-            --config config.yaml
-        """,
-        cmd_timeout=120,
-    )
+        run_stage1 >> check_s3_stage1_out >> run_stage2 >> check_s3_stage2_out
 
-    # --------------------------------------------------------
-    # 13-14. Spark + EC2 종료 (성공/실패 무관하게 항상 실행)
-    # --------------------------------------------------------
-    stop_spark = SSHOperator(
-        task_id="stop_spark",
-        ssh_conn_id=SSH_CONN_ID,
-        command="source ~/.bashrc && /opt/spark/sbin/stop-all.sh ; /opt/spark/sbin/stop-history-server.sh ;",
-        cmd_timeout=120,
-        trigger_rule="all_done",
-    )
+    # ========================================================
+    # 서빙 (RDB 적재 → MV 갱신 → 이메일)
+    # ========================================================
+    with TaskGroup("serving", tooltip="PostgreSQL 적재 → MV 갱신 → 이메일 리포트") as serving:
 
-    stop_cluster = BashOperator(
-        task_id="stop_cluster",
-        bash_command=f"""
-        echo "EC2 인스턴스 중지 중..."
-        sleep 5
-        aws ec2 stop-instances \
-            --instance-ids {ALL_INSTANCE_IDS} \
-            --region {AWS_REGION}
-        echo "EC2 인스턴스 중지 완료 (비용 절감)"
-        """,
-        trigger_rule="all_done",
-    )
+        load_to_rdb = SSHOperator(
+            task_id="load_to_rdb",
+            ssh_conn_id=SERVING_SSH_CONN_ID,
+            command=f"""
+            set -a && source {SERVING_DIR}/.env && set +a
+            source {SERVING_VENV}/bin/activate
+            cd {SERVING_DIR}
+            python -m loaders.pothole_loader \
+                --s3-path "s3://{S3_BUCKET}/{S3_STAGE2_OUTPUT_PREFIX}/dt={{{{ ds }}}}/" \
+                --date "{{{{ ds }}}}" \
+                --config config.yaml
+            """,
+            cmd_timeout=600,
+        )
+
+        refresh_views = SSHOperator(
+            task_id="refresh_views",
+            ssh_conn_id=SERVING_SSH_CONN_ID,
+            command=f"""
+            set -a && source {SERVING_DIR}/.env && set +a
+            docker exec pothole-postgres psql -U pothole_user -d road_safety -c "
+                REFRESH MATERIALIZED VIEW CONCURRENTLY mvw_dashboard_heatmap;
+                REFRESH MATERIALIZED VIEW CONCURRENTLY mvw_dashboard_weekly_stats;
+                REFRESH MATERIALIZED VIEW CONCURRENTLY mvw_dashboard_repair_priority;
+            "
+            echo "=== Materialized View 갱신 완료 ==="
+            """,
+            cmd_timeout=300,
+        )
+
+        send_email_report = SSHOperator(
+            task_id="send_email_report",
+            ssh_conn_id=SERVING_SSH_CONN_ID,
+            command=f"""
+            set -a && source {SERVING_DIR}/.env && set +a
+            source {SERVING_VENV}/bin/activate
+            cd {SERVING_DIR}
+            python -m reporters.email_reporter \
+                --email "$REPORT_EMAIL" \
+                --date "{{{{ ds }}}}" \
+                --config config.yaml
+            """,
+            cmd_timeout=120,
+        )
+
+        load_to_rdb >> refresh_views >> send_email_report
+
+    # ========================================================
+    # 인프라 정리 (성공/실패 무관)
+    # ========================================================
+    with TaskGroup("infra_cleanup", tooltip="Spark 종료 → EC2 중지") as infra_cleanup:
+
+        stop_spark = SSHOperator(
+            task_id="stop_spark",
+            ssh_conn_id=SSH_CONN_ID,
+            command="source ~/.bashrc && /opt/spark/sbin/stop-all.sh ; /opt/spark/sbin/stop-history-server.sh ;",
+            cmd_timeout=120,
+            trigger_rule="all_done",
+        )
+
+        stop_cluster = BashOperator(
+            task_id="stop_cluster",
+            bash_command=f"""
+            echo "EC2 인스턴스 중지 중..."
+            sleep 5
+            aws ec2 stop-instances \
+                --instance-ids {ALL_INSTANCE_IDS} \
+                --region {AWS_REGION}
+            echo "EC2 인스턴스 중지 완료 (비용 절감)"
+            """,
+            trigger_rule="all_done",
+        )
+
+        stop_spark >> stop_cluster
 
     # --------------------------------------------------------
     # 의존성
     # --------------------------------------------------------
-    check_s3_input >> start_cluster >> start_spark >> download_code
-    download_code >> install_deps >> run_stage1 >> check_s3_stage1_out
-    check_s3_stage1_out >> run_stage2 >> check_s3_stage2_out
-    check_s3_stage2_out >> load_to_rdb >> refresh_views >> send_email_report
-    send_email_report >> stop_spark >> stop_cluster
+    check_s3_input >> infra_setup >> spark_processing >> serving >> infra_cleanup
