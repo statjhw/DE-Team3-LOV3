@@ -97,13 +97,15 @@
 
 ### 4-1. 데이터 흐름도
 
-![데이터 흐름도](docs/images/data_flow_chart.png)
+![데이터 흐름도](docs/images/data_flow_v2.png)
 
 - **차량 센서 데이터** — 가속도, 자이로, GPS 등 주행 측정값 (S3 Parquet)
 - **ITS 표준노드링크** — 863호선 도로 속성 (Shapefile)
 - **외부 API** — Kakao 역지오코딩, 공공 민원 데이터
 
-### 4-2. 데이터 아키텍처
+### 4-2. 인프라 아키텍처
+
+![인프라 아키텍처](docs/images/infra_architecture.png)
 
 ### 4-3. 모듈 설명
 
