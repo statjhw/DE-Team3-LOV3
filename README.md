@@ -63,7 +63,15 @@
 | **포트홀 관제 대시보드** | 긴급 보수가 필요한 구간을 최상단에 배치한 ‘Action List’ 제공 |
 | **자동 이메일 리포트** | 매일 배치 완료 후 담당 주무관에게 보수 우선순위 리포트 자동 발송 |
 
+<br>
+
+**포트홀 관제 대시보드**
+
 ![dashboard](./docs/images/dashboard.png)
+
+<br>
+
+**자동 이메일 리포트**
 
 ![email](./docs/images/email.png)
 
