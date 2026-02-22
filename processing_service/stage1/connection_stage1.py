@@ -1,27 +1,3 @@
-"""
-Stage 1: 설정 및 Spark 연결 관리 모듈
-
-이 모듈은 Stage 1 Anomaly Detection 파이프라인의 초기화를 담당합니다.
-YAML 설정 파일 로드 및 Spark 세션 생성, Adaptive Query Execution 최적화를 제공합니다.
-
-Module Functions:
-    load_config: YAML 설정 파일을 로컬 경로 또는 S3에서 로드하고 파싱
-    get_spark_session: Spark 설정을 기반으로 SparkSession 인스턴스 생성
-
-Example:
-    >>> config = load_config("config_prod.yaml")
-    >>> spark = get_spark_session(config)
-    >>> input_df = spark.read.parquet("s3a://bucket/data")
-
-Supported Config Formats:
-    - Local: /path/to/config.yaml
-    - S3: s3a://bucket-name/path/to/config.yaml
-
-Error Handling:
-    - 설정 파일 로드 실패 시 경고 로그 기록 후 빈 dict 반환
-    - KeyError는 상위 호출자가 처리 (pipeline 유효성 검증)
-"""
-
 import os
 import yaml
 import logging
@@ -32,9 +8,6 @@ logger = logging.getLogger(__name__)
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
-    """
-    YAML 설정 파일 로드 (로컬 또는 s3a://)
-    """
     path = config_path.strip()
     try:
         if path.startswith("s3a://"):
@@ -56,9 +29,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
 
 
 def get_spark_session(config: Dict[str, Any]) -> SparkSession:
-    """
-    config의 spark 설정으로 SparkSession 생성
-    """
+    #config의 spark 설정으로 SparkSession 생성
     spark_cfg = config.get("spark", {})
     app_name = spark_cfg.get("app_name", "Stage1-AnomalyDetection")
     master = spark_cfg.get("master")
@@ -69,13 +40,11 @@ def get_spark_session(config: Dict[str, Any]) -> SparkSession:
         logger.info("Spark Master: %s", master)
     else:
         logger.info("Spark Master: 미설정 (클러스터 모드)")
-
     builder = (
         builder
-        .config("spark.sql.adaptive.enabled", spark_cfg.get("adaptive_enabled", True))
-        .config("spark.sql.adaptive.coalescePartitions.enabled", spark_cfg.get("adaptive_coalesce_enabled", True))
-        .config("spark.sql.adaptive.skewJoin.enabled", spark_cfg.get("skew_join_enabled", True))
-        .config("spark.sql.files.openCostInBytes", f"{spark_cfg.get('min_partition_size_mb', 128) * 1024 * 1024}")
+        .config("spark.sql.adaptive.enabled", spark_cfg.get("adaptive_enabled", False))
+        .config("spark.sql.adaptive.coalescePartitions.enabled", spark_cfg.get("adaptive_coalesce_enabled", False))
+        .config("spark.sql.adaptive.skewJoin.enabled", spark_cfg.get("skew_join_enabled", False))
         .config("spark.sql.files.maxPartitionBytes", f"{spark_cfg.get('partition_size_mb', 128) * 1024 * 1024}")
     )
     shuffle = spark_cfg.get("shuffle_partitions")
@@ -83,5 +52,15 @@ def get_spark_session(config: Dict[str, Any]) -> SparkSession:
         builder = builder.config("spark.sql.shuffle.partitions", shuffle)
 
     spark = builder.getOrCreate()
+
+    conf = spark.sparkContext.getConf()
+    logger.info("executor-memory    : %s", conf.get("spark.executor.memory", "미설정"))
+    logger.info("executor-cores     : %s", conf.get("spark.executor.cores", "미설정"))
+    logger.info("num-executors      : %s", conf.get("spark.executor.instances", "미설정"))
+    logger.info("driver-memory      : %s", conf.get("spark.driver.memory", "미설정"))
+    logger.info("shuffle.partitions : %s", conf.get("spark.sql.shuffle.partitions", "미설정"))
+    logger.info("adaptive.enabled   : %s", conf.get("spark.sql.adaptive.enabled", "미설정"))
+    logger.info("maxPartitionBytes  : %s", conf.get("spark.sql.files.maxPartitionBytes", "미설정"))
+
     logger.info("SparkSession 생성 완료")
     return spark
