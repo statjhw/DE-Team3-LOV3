@@ -98,23 +98,18 @@
 ## 5. 데이터 파이프라인 설계 및 기술적 고려
 
 ### 5-1. 기술적 고려사항 
-[spark 최적화](./docs/)
-
-[데이터 모델링](./docs/data_modeling.md)
+- [spark 최적화](./docs/)
+- [데이터 모델링](./docs/data_modeling.md)
 
 ### 5-2. 비즈니스 로직 고려 사항
-[방지턱 필터링](./docs/bump_filtering.md)
-
-[민원 데이터, 위험 도로 등급으로 가중치 설정](./docs/real_data.md)
+- [방지턱 필터링](./docs/bump_filtering.md)
+- [민원 데이터, 위험 도로 등급으로 가중치 설정](./docs/real_data.md)
 
 ### 5-3. 운영 고려 사항
-[S3 인터페이스를 통한 모듈 간 의존성 분리](./docs/s3_interface.md)
-
-[Airflow 장애 알림 설계](./docs/alerting.md)
-
-[GitHub Actions CD — Spark 코드 자동 배포](./docs/cd_pipeline.md)
-
-[인프라 관리 — EC2 클러스터 온디맨드 운영](./docs/infra_management.md)
+- [S3 인터페이스를 통한 모듈 간 의존성 분리](./docs/s3_interface.md)
+- [Airflow 장애 알림 설계](./docs/alerting.md)
+- [GitHub Actions CD — Spark 코드 자동 배포](./docs/cd_pipeline.md)
+- [인프라 관리 — EC2 클러스터 온디맨드 운영](./docs/infra_management.md)
 
 
 ##  6. 기술 스택
