@@ -4,7 +4,8 @@ import folium
 from streamlit_folium import st_folium
 from sqlalchemy import create_engine
 import plotly.express as px
-from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode # ★ 추가된 라이브러리
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
+import streamlit.components.v1 as components
 
 # -------------------------------------------------------------------------
 # 1. 페이지 기본 설정
@@ -161,98 +162,89 @@ st.divider()
 # =========================================================================
 # [하단 영역] 지도 및 통계 
 # =========================================================================
-col_map, col_stats = st.columns([6, 4])
+tab_list, tab_map = st.tabs(["📝 보수 요청 및 통계", "🗺️ 포트홀 시급도 맵"])
 
-with col_map:
-    st.subheader("📍 도로 보수 시급도 맵") 
+# -------------------------------------------------------------------------
+# [탭 1] 빠른 인터랙션을 위한 리스트 및 차트 영역
+# -------------------------------------------------------------------------
+with tab_list:
+    # 탭 내부를 2단으로 나누어 한눈에 보기 좋게 배치
+    col_kpi, col_chart = st.columns([4, 6])
     
-    center_lat, center_lon = 37.5665, 126.9780
-    zoom_level = 11
-    target_road = None
-    
-    # 지도 중심 이동 로직 (AgGrid 선택 데이터 활용)
-    if selected_data:
-        # s_id를 기준으로 원본 df_priority에서 정확한 좌표 탐색
-        target_sid = selected_data[0]['s_id']
-        matched_row = df_priority[df_priority['s_id'] == target_sid].iloc[0]
-        
-        center_lat = matched_row['centroid_lat']
-        center_lon = matched_row['centroid_lon']
-        zoom_level = 16 
-        target_road = matched_row['road_name']
-
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=zoom_level, tiles="CartoDB positron")
-    
-    for _, row in df_priority.iterrows():
-        score = row['priority_score']
-        if score >= 1000:       
-            color, radius = 'red', 12
-        elif score >= 300:      
-            color, radius = 'orange', 8
-        else:                   
-            color, radius = 'green', 5
+    with col_kpi:
+        st.subheader("📈 핵심 지표 요약")
+        if not df_priority.empty:
+            st.metric(
+                label="현재 가장 위험한 도로", 
+                value=df_priority.iloc[0]['road_name'], 
+                delta=f"1순위 ({df_priority.iloc[0]['district']})", 
+                delta_color="inverse"
+            )
             
-        status_val = st.session_state.dummy_requests.get(row['s_id'], 0)
-        status_text = "❌ 미완료" if status_val == 0 else ("🚧 진행중" if status_val == 2 else "✅ 완료")
+            kpi1, kpi2 = st.columns(2)
+            with kpi1:
+                total_complaints = int(df_priority['complaint_count'].sum())
+                st.metric(label="누적 시민 민원", value=f"{total_complaints}건")
+            with kpi2:
+                total_impacts = int(df_priority['total_impacts'].sum())
+                st.metric(label="누적 충격 감지", value=f"{total_impacts:,}회")
 
-        tooltip_html = f"""
-        <b>{row['road_name']} ({row['district']})</b><br>
-        - 우선순위 순위: <b>{row['priority_rank']}위</b><br>
-        - 보수 시급 점수: {score}점<br>
-        - 접수 민원: {row['complaint_count']}건<br>
-        - <b>진행 상태: {status_text}</b>
-        """
+    with col_chart:
+        st.subheader("📊 최근 7일 요일별 통계")
+        if not df_weekly.empty:
+            fig = px.bar(
+                df_weekly, 
+                x='day_of_week', 
+                y=['impact_count', 'total_count'],
+                barmode='group',
+                color_discrete_map={'impact_count': '#EF553B', 'total_count': '#636EFA'}
+            )
+            fig.update_layout(margin=dict(l=20, r=20, t=30, b=20), height=250)
+            st.plotly_chart(fig, use_container_width=True)
+
+# -------------------------------------------------------------------------
+# [탭 2] 전체 지도
+# -------------------------------------------------------------------------
+with tab_map:
+    st.subheader("📍 전체 도로 보수 지도") 
+    
+    # 1. 결측치(NaN) 제거 및 100개 데이터 추출
+    df_valid = df_priority.dropna(subset=['centroid_lat', 'centroid_lon'])
+    
+# 2. ★ 핵심: 데이터들의 실제 평균 좌표 및 상위 % 기준 점수 계산
+    if not df_valid.empty:
+        center_lat = df_valid['centroid_lat'].mean()
+        center_lon = df_valid['centroid_lon'].mean()
+        
+        # 데이터 기준 상위 20%(0.8), 상위 50%(0.5) 점수 컷오프 계산
+        high_risk_threshold = df_valid['priority_score'].quantile(0.8)
+        mid_risk_threshold = df_valid['priority_score'].quantile(0.5)
+    else:
+        # 혹시 데이터가 아예 없을 때를 대비한 기본값
+        center_lat, center_lon = 37.5665, 126.9780 
+        high_risk_threshold, mid_risk_threshold = 200, 100
+
+    # 3. 계산된 중심 좌표로 지도 띄우기 (zoom_start 조절로 확대 정도 변경 가능)
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles="CartoDB positron")
+    
+    # 4. 마커 렌더링
+    for _, row in df_valid.iterrows():
+        score = row['priority_score']
+        
+        # 고정된 숫자 대신 위에서 계산한 기준(threshold)을 사용
+        if score >= high_risk_threshold:       
+            color, radius = 'red', 8      # 위험도 높으면 크기도 살짝 크게 (6 -> 8)
+        elif score >= mid_risk_threshold:      
+            color, radius = 'orange', 6
+        else:                   
+            color, radius = 'green', 5    # 안전한 곳은 살짝 작게 (6 -> 5)
+            
+        tooltip_html = f"<b>{row['road_name']}</b><br>우선순위: {row['priority_rank']}위<br>점수: {score:.1f}점"
         
         folium.CircleMarker(
             location=[row['centroid_lat'], row['centroid_lon']],
-            radius=radius, color=color, fill=True, fill_opacity=0.6, tooltip=tooltip_html
+            radius=radius, color=color, fill=True, tooltip=tooltip_html
         ).add_to(m)
 
-    if selected_data and target_road:
-        folium.Marker(
-            location=[center_lat, center_lon],
-            popup=f"선택됨: {target_road}",
-            icon=folium.Icon(color='red', icon='info-sign')
-        ).add_to(m)
-
-    st_folium(m, width='stretch', height=600, returned_objects=[], key="pothole_map")
-
-with col_stats:
-    st.subheader("📈 핵심 지표 요약")
-    if not df_priority.empty:
-        st.metric(
-            label="현재 가장 위험한 도로", 
-            value=df_priority.iloc[0]['road_name'], 
-            delta=f"1순위 ({df_priority.iloc[0]['district']})", 
-            delta_color="inverse"
-        )
-        
-        kpi1, kpi2 = st.columns(2)
-        with kpi1:
-            total_complaints = int(df_priority['complaint_count'].sum())
-            st.metric(label="누적 시민 민원", value=f"{total_complaints}건")
-        with kpi2:
-            total_impacts = int(df_priority['total_impacts'].sum())
-            st.metric(label="누적 충격 감지", value=f"{total_impacts:,}회")
-            
-    st.divider()
-
-    st.subheader("📊 최근 7일 요일별 통계")
-    if not df_weekly.empty:
-        fig = px.bar(
-            df_weekly, 
-            x='day_of_week', 
-            y=['impact_count', 'total_count'],
-            barmode='group',
-            labels={'value': '건수 / 통행량', 'day_of_week': '요일', 'variable': '지표'},
-            color_discrete_map={'impact_count': '#EF553B', 'total_count': '#636EFA'}
-        )
-        newnames = {'impact_count':'포트홀 충격 횟수', 'total_count': '차량 통행량'}
-        fig.for_each_trace(lambda t: t.update(name = newnames[t.name],
-                                            legendgroup = newnames[t.name],
-                                            hovertemplate = t.hovertemplate.replace(t.name, newnames[t.name])))
-        
-        fig.update_layout(margin=dict(l=20, r=20, t=30, b=20))
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("최근 7일간의 통계 데이터가 없습니다.")
+    # 5. HTML 방식으로 초고속 렌더링 (통신 렉 없음)
+    components.html(m._repr_html_(), height=500)
