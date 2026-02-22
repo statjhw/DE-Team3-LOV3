@@ -72,7 +72,7 @@ st.markdown("<br>자동차의 센서 데이터와 시민 민원을 융합한 포
 st.subheader("🚨 보수 우선순위 랭킹")
 st.markdown("💡 표의 **텍스트 영역 아무 곳이나 클릭**하여 행을 선택하고 보수 요청을 진행하세요. 👆")
 
-display_df = df_priority[['priority_rank', '도로명(경도, 위도)', 'district', 'priority_score', 'complaint_count', 's_id']].copy()
+display_df = df_priority[['priority_rank', '도로명(위도, 경도)', 'district', 'priority_score', 'complaint_count', 's_id']].copy()
 display_df['request'] = display_df['s_id'].apply(lambda x: st.session_state.dummy_requests.get(x, 0))
 
 def get_status_text(val):
@@ -83,8 +83,8 @@ def get_status_text(val):
 display_df['진행 상태'] = display_df['request'].apply(get_status_text)
 
 # 표에 보여줄 컬럼 지정 (s_id, request는 백그라운드에서만 사용)
-show_df = display_df[['priority_rank', '도로명(경도, 위도)', 'district', 'priority_score', 'complaint_count', '진행 상태', 's_id', 'request']]
-show_df.columns = ['순위', '도로명 (경도, 위도)', '관할 구역', '위험 점수', '민원(건)', '진행 상태', 's_id', 'request']
+show_df = display_df[['priority_rank', '도로명(위도, 경도)', 'district', 'priority_score', 'complaint_count', '진행 상태', 's_id', 'request']]
+show_df.columns = ['순위', '도로명 (위도, 경도)', '관할 구역', '위험 점수', '민원(건)', '진행 상태', 's_id', 'request']
 
 # ★ AgGrid 설정 (체크박스 완전 제거, 행 클릭 선택)
 gb = GridOptionsBuilder.from_dataframe(show_df)
@@ -122,7 +122,7 @@ with btn_col1:
     else:
         # 선택된 행의 데이터 추출
         row_data = selected_data[0]
-        selected_road_display = row_data['도로명 (경도, 위도)']
+        selected_road_display = row_data['도로명 (위도, 경도)']
         current_status = row_data['request']
         
         if current_status == 0:
@@ -139,7 +139,7 @@ with btn_col2:
         row_data = selected_data[0]
         selected_sid = row_data['s_id']
         # 원래 도로명만 추출 (괄호 앞부분)
-        selected_road_raw = row_data['도로명 (경도, 위도)'].split(' (')[0]
+        selected_road_raw = row_data['도로명 (위도, 경도)'].split(' (')[0]
         current_status = row_data['request']
         
         if current_status == 0:
