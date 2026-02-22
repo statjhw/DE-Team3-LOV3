@@ -1,16 +1,17 @@
 storage:
   input_base_path: "s3a://softeer-7-de3-bucket/raw-sensor-data"
   output_base_path: "s3a://softeer-7-de3-bucket/stage1_anomaly_detected"
+  speed_bump_path : "s3a://softeer-7-de3-bucket/speed-bump/yeosu_provincial_road_speed_bump_data.csv"
   input_partition_format: "dt=YYYY-MM-DD"
   ttl_days: 14
 
 spark:
   master: null   # spark-submit 클러스터 사용
-  app_name: "Stage1-AnomalyDetection-Prod"
+  app_name: "Stage1-AnomalyDetection-prod"
   partition_size_mb: 128
   min_partition_size_mb: 128
-  shuffle_partitions: "auto"
-  coalesce_partitions: 16
+  shuffle_partitions: 16
+  coalesce_partitions: 4
   adaptive_enabled: true
   adaptive_coalesce_enabled: true
   skew_join_enabled: true
@@ -32,15 +33,6 @@ impact_score:
     accel_z: 0.7
     gyro_y: 0.3
   threshold: 3.0
-
-stage2:
-  enable_salting: true
-  salting_buckets: 10
-  road_network_format: parquet
-
-rdb:
-  url: ""
-  pothole_segments_table: pothole_segments
 
 logging:
   level: INFO
