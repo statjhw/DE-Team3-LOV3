@@ -35,8 +35,8 @@ with st.spinner('데이터를 불러오는 중입니다...'):
     df_weekly = load_data("SELECT * FROM mvw_dashboard_weekly_stats ORDER BY dow_num ASC;")
 
 if not df_priority.empty:
-    df_priority['도로명(경도, 위도)'] = df_priority.apply(
-        lambda x: f"{x['road_name']} ({x['centroid_lon']:.4f}, {x['centroid_lat']:.4f})", axis=1
+    df_priority['도로명(위도, 경도)'] = df_priority.apply(
+        lambda x: f"{x['road_name']} ({x['centroid_lat']:.4f}, {x['centroid_lon']:.4f})", axis=1
     )
 
 # -------------------------------------------------------------------------
@@ -209,7 +209,7 @@ with tab_map:
     st.subheader("📍 전체 도로 보수 지도") 
     
     # 1. 결측치(NaN) 제거 및 100개 데이터 추출
-    df_valid = df_priority.dropna(subset=['centroid_lat', 'centroid_lon'])
+    df_valid = df_priority.dropna(subset=['centroid_lat', 'centroid_lon']).head(100)
     
 # 2. ★ 핵심: 데이터들의 실제 평균 좌표 및 상위 % 기준 점수 계산
     if not df_valid.empty:
