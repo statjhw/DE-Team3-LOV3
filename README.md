@@ -97,7 +97,7 @@
 
 ### 4-1. 데이터 흐름도
 
-![데이터 흐름도](docs/images/data_flow_v2.png)
+![데이터 흐름도](docs/images/data_flow_v3.png)
 
 - **차량 센서 데이터** — 가속도, 자이로, GPS 등 주행 측정값 (S3 Parquet)
 - **ITS 표준노드링크** — 863호선 도로 속성 (Shapefile)
