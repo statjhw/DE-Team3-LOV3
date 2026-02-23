@@ -35,9 +35,17 @@ with st.spinner('데이터를 불러오는 중입니다...'):
     df_weekly = load_data("SELECT * FROM mvw_dashboard_weekly_stats ORDER BY dow_num ASC;")
 
 if not df_priority.empty:
+    # 1. [추가] 먼저 주소가 없는 행을 삭제합니다.
+    # 이렇게 하면 아래의 lambda 함수가 None을 만날 일이 아예 없습니다.
+    df_priority = df_priority.dropna(subset=['road_name'])
+
+    # 2. [기존 유지] 주소가 있는 데이터들만 남았으므로 그대로 가공합니다.
     df_priority['도로명(위도, 경도)'] = df_priority.apply(
         lambda x: f"{x['road_name']} ({x['centroid_lat']:.4f}, {x['centroid_lon']:.4f})", axis=1
     )
+    
+    # 3. [추가] 리스트 순위를 1번부터 다시 매깁니다. (중간에 빈 번호가 안 생기게)
+    df_priority['priority_rank'] = range(1, len(df_priority) + 1)
 
 # -------------------------------------------------------------------------
 # 3. 상태 관리 및 콜백 함수
