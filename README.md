@@ -104,6 +104,104 @@
 - **ITS 표준노드링크** — 863호선 도로 속성 (Shapefile)
 - **외부 API** — Kakao 역지오코딩, 공공 민원 데이터
 
+> 각 단계별 Input/Output 스키마는 아래 토글에서 확인할 수 있습니다.
+
+<details>
+<summary><b>[1] 센서 데이터 수집 및 Stage 1 이상탐지</b></summary>
+
+**Input** — 차량 센서 데이터 (S3 Parquet)
+
+| 컬럼 | 타입 | 설명 |
+|------|------|------|
+| `timestamp` | TIMESTAMP | 센서 수집 시각 |
+| `trip_id` | STRING | trip 식별자 |
+| `vehicle_id` | STRING | 차량 식별자 |
+| `accel_x/y/z` | DOUBLE | 3축 가속도 (m/s²) |
+| `gyro_x/y/z` | DOUBLE | 3축 자이로스코프 (°/s) |
+| `velocity` | DOUBLE | 주행 속도 (km/h) |
+| `lon`, `lat` | DOUBLE | GPS 경·위도 |
+| `hdop` | DOUBLE | GPS 수평 정밀도 저하율 |
+| `satellites` | INT | GPS 수신 위성 수 |
+
+**Output** — 이상탐지 결과
+
+| 컬럼 | 타입 | 설명 |
+|------|------|------|
+| `timestamp` | TIMESTAMP | 센서 수집 시각 |
+| `lon`, `lat` | DOUBLE | GPS 경·위도 |
+| `impact_score` | DOUBLE | 정규화 센서값 기반 충격 점수 |
+| `is_pothole` | INT | 포트홀 여부 (1, 0) |
+
+</details>
+
+<details>
+<summary><b>[2] Stage 2 공간 클러스터링 (Stage 1 결과 + 도로망 조인)</b></summary>
+
+**Input 1** — Stage 1 이상탐지 결과 (위 Output과 동일)
+
+**Input 2** — 도로 세그먼트 (build_segments.py · 50m 분할)
+
+| 컬럼 | 타입 | 설명 |
+|------|------|------|
+| `s_id` | STRING | 세그먼트 ID |
+| `start_lon`, `start_lat` | DOUBLE | 시작점 GPS 좌표 |
+| `end_lon`, `end_lat` | DOUBLE | 끝점 GPS 좌표 |
+
+**Output** — UPSERT → `pothole_segments`
+
+| 컬럼 | 타입 | 설명 |
+|------|------|------|
+| `s_id` | VARCHAR(50) | 세그먼트 ID |
+| `centroid_lon`, `centroid_lat` | DOUBLE | 세그먼트 중심 좌표 |
+| `date` | DATE | 집계 날짜 |
+| `impact_count` | INTEGER | 포트홀 탐지 횟수 |
+| `total_count` | INTEGER | 전체 포인트 수 |
+
+</details>
+
+<details>
+<summary><b>[3] 사전 구축 및 데이터 로더 (PostgreSQL 적재)</b></summary>
+
+**build_road_grade.py** → `segment_road_grade`
+
+| 컬럼 | 타입 | 설명 |
+|------|------|------|
+| `s_id` | VARCHAR(50) | 세그먼트 ID |
+| `link_id` | VARCHAR(50) | ITS 링크 ID |
+| `road_grade` | INTEGER | 도로 위험도 등급 (1~5) |
+
+**complaint_loader** → `pothole_complaints`
+
+| 컬럼 | 타입 | 설명 |
+|------|------|------|
+| `create_dt` | DATE | 민원 접수일 |
+| `event_lon`, `event_lat` | DOUBLE | 민원 좌표 |
+| `nearest_s_id` | VARCHAR(50) | 500m 이내 매칭 세그먼트 |
+| `distance_m` | DOUBLE | 매칭 거리 |
+
+**reverse_geocoding** → `segment_address`
+
+| 컬럼 | 타입 | 설명 |
+|------|------|------|
+| `s_id` | VARCHAR(50) | 세그먼트 ID |
+| `road_name` | VARCHAR(200) | 도로명 |
+| `district` | VARCHAR(100) | 시군구 |
+
+</details>
+
+<details>
+<summary><b>[4] Materialized Views 집계 및 Dashboard 서빙</b></summary>
+
+| 테이블/뷰 | 설명 |
+|-----------|------|
+| `pothole_segments` | 세그먼트별 일간 포트홀 집계 (Fact, 월별 파티션) |
+| `segment_address` | 세그먼트 주소 — Kakao 역지오코딩 (Dimension) |
+| `segment_road_grade` | 도로 위험도 등급 1~5 |
+| `pothole_complaints` | 공공데이터 포트홀 민원 (500m 매칭) |
+| **Materialized Views** | heatmap · 우선순위 스코어 · 주간 통계 |
+
+</details>
+
 ### 4-2. 인프라 아키텍처
 
 ![인프라 아키텍처](docs/images/infra_architecture.png)
